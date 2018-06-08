@@ -1,0 +1,74 @@
+#!/bin/sh
+
+[ -n "$*" ] && h="$*"
+
+set noglog; #eval `resize`
+
+progname=`basename $0`
+
+optdir=$HOME/.ssh-wrapper
+mkdir -p $optdir
+
+if [ ! -f $optdir/session.$TERM_SESSION_ID ]; then
+
+  histfile=$optdir/${progname}_history
+
+  history -r $histfile
+
+  while [ -z "$h" ]; do
+    read -e -p "Host: " h
+  done
+
+  if [ "`tail -1 $histfile`" != "$h" ]; then
+    echo $h >> $histfile
+  fi
+
+  if [ "$progname" == "ssh-root" ]; then
+    sshopt="-l root"
+  fi
+  
+  ssh-copy-id $sshopt $h
+  
+  if [ $? == 0 ]; then
+  
+    if [ -e "$optdir/$h.def-fwd-ssh-agent" ]; then
+  
+            sshopt="$sshopt -A"
+  
+    else
+  
+      read -p "Do you want to forward ssh-agent to $h? [y/a/N] " risp
+      if [ "x$risp" == "xa" ] || [ "x$risp" == "xA" ]; then
+        sshopt="$sshopt -A"
+        touch "$optdir/$h.def-fwd-ssh-agent"
+      fi
+      if [ "x$risp" == "xy" ] || [ "x$risp" == "xY" ]; then
+        sshopt="$sshopt -A"
+      fi
+  
+    fi
+  
+  fi
+  
+  SSHCMD="ssh -X -K $sshopt $h"
+
+else
+
+  SSHCMD=`cat $optdir/session.$TERM_SESSION_ID`
+
+fi
+
+a='r'
+while [ x$a != xq ] && [ x$a != xQ ]; do
+
+  echo "$SSHCMD" > $optdir/session.$TERM_SESSION_ID
+  $SSHCMD
+  echo
+  read -n 1 -p "Press any key to reconnect or 'q' to quit. " a
+  echo
+
+done
+
+rm -f $optdir/session.$TERM_SESSION_ID
+exit 0
+
