@@ -9,7 +9,9 @@ progname=`basename $0`
 optdir=$HOME/.ssh-wrapper
 mkdir -p $optdir
 
-if [ ! -f $optdir/session.$TERM_SESSION_ID ]; then
+itermSessionID=${TERM_SESSION_ID#*:}
+
+if [ ! -f $optdir/session.$itermSessionID ]; then
 
   histfile=$optdir/${progname}_history
 
@@ -27,7 +29,7 @@ if [ ! -f $optdir/session.$TERM_SESSION_ID ]; then
     sshopt="-l root"
   fi
   
-  ssh-copy-id $sshopt $h
+  ~/bin/ssh-copy-id.sh $sshopt $h
   
   if [ $? == 0 ]; then
   
@@ -50,18 +52,18 @@ if [ ! -f $optdir/session.$TERM_SESSION_ID ]; then
   
   fi
   
-  SSHCMD="ssh -X -K $sshopt $h"
+  SSHCMD="ssh $sshopt $h"
 
 else
 
-  SSHCMD=`cat $optdir/session.$TERM_SESSION_ID`
+  SSHCMD=`cat $optdir/session.$itermSessionID`
 
 fi
 
 a='r'
 while [ x$a != xq ] && [ x$a != xQ ]; do
 
-  echo "$SSHCMD" > $optdir/session.$TERM_SESSION_ID
+  echo "$SSHCMD" > $optdir/session.$itermSessionID
   $SSHCMD
   echo
   read -n 1 -p "Press any key to reconnect or 'q' to quit. " a
@@ -69,6 +71,6 @@ while [ x$a != xq ] && [ x$a != xQ ]; do
 
 done
 
-rm -f $optdir/session.$TERM_SESSION_ID
+rm -f $optdir/session.$itermSessionID
 exit 0
 
