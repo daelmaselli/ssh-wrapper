@@ -4,12 +4,37 @@
 
 set noglog; #eval `resize`
 
-progname=`basename $0`
-
+PKEY="$HOME/.ssh/id_rsa"
+KEY="$HOME/.ssh/id_rsa.pub"
 optdir=$HOME/.ssh-wrapper
+
+progname=`basename $0`
+itermSessionID=${TERM_SESSION_ID#*:}
 mkdir -p $optdir
 
-itermSessionID=${TERM_SESSION_ID#*:}
+function ssh_copy_id_func {
+
+  if [ ! -f $KEY ];then
+      echo "private key not found at $KEY"
+      echo "* please create it with \"ssh-keygen -t rsa\" *"
+      return
+  fi
+
+  ssh-add -l | grep -q "The agent has no identities."
+  [ $? == 0 ] && ssh-add $PKEY
+
+  r=`ssh $* -x -K -o PasswordAuthentication=no -o NumberOfPasswordPrompts=0 true 2>&1`
+  [ $? == 0 ] && return
+
+  echo $r | grep -q "Could not resolve hostname" && exit 1
+
+  read -p "Do you want to add $KEY to $*:~/.ssh/authorized_keys? [y/N] " risp
+  [ "x$risp" != "xy" ] && [ "x$risp" != "xY" ] && return
+
+  ssh -q -x $* "umask 0077; mkdir -p ~/.ssh ; echo "`cat $KEY`" >> ~/.ssh/authorized_keys"
+  [ $? == 0 ] || return
+  echo "PublicKey added!"
+}
 
 if [ ! -f $optdir/session.$itermSessionID ]; then
 
@@ -29,7 +54,7 @@ if [ ! -f $optdir/session.$itermSessionID ]; then
     sshopt="-l root"
   fi
   
-  ~/bin/ssh-copy-id.sh $sshopt $h
+  ssh_copy_id_func $sshopt $h
   
   if [ $? == 0 ]; then
   
@@ -57,6 +82,7 @@ if [ ! -f $optdir/session.$itermSessionID ]; then
 else
 
   SSHCMD=`cat $optdir/session.$itermSessionID`
+  touch $optdir/session.restore.time
 
 fi
 
