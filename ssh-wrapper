@@ -10,6 +10,8 @@ optdir=$HOME/.ssh-wrapper
 
 progname=`basename $0`
 itermSessionID=${TERM_SESSION_ID#*:}
+[ -z "$itermSessionID" ] && itermSessionID="pid_$$"
+muxSessionName="ssh_wrapper_$(printf '%s' "$itermSessionID" | tr -c '[:alnum:]_-' '_')"
 mkdir -p $optdir
 
 function ssh_copy_id_func {
@@ -77,26 +79,156 @@ if [ ! -f $optdir/session.$itermSessionID ]; then
   
   fi
   
-  SSHCMD="ssh $sshopt $h"
+  SSHCMD="ssh -t $sshopt $h"
 
 else
 
   SSHCMD=`cat $optdir/session.$itermSessionID`
+  [[ "$SSHCMD" == ssh\ -t\ * ]] || SSHCMD="${SSHCMD/ssh /ssh -t }"
   touch $optdir/session.restore.time
 
 fi
 
-a='r'
-while [ x$a != xq ] && [ x$a != xQ ]; do
+choose_screen_action() {
+  # This is intentionally local and is called before every interactive SSH
+  # connection, including after a dropped remote session.
+  while true; do
+    printf '\nScreen session action: [r]ecover (default), [c]reate, [l]ist, [s]hell, [q]uit: '
+    read -r -n 1 screenAction
+    printf '\n'
+
+    case "$screenAction" in
+      ''|r|R) screenAction=1; return 0 ;;
+      c|C)    screenAction=2; return 0 ;;
+      l|L)    screenAction=3; return 0 ;;
+      s|S)    screenAction=4; return 0 ;;
+      q|Q)    return 1 ;;
+      *)      printf 'Unknown choice.\n' >&2 ;;
+    esac
+  done
+}
+
+# This runs on the remote host after SSH authentication.
+IFS= read -r -d '' REMOTE_SESSION_CMD <<'REMOTE_COMMAND'
+default_session="__SSH_WRAPPER_SESSION__"
+action="__SSH_WRAPPER_ACTION__"
+
+normal_shell() {
+  exec "${SHELL:-/bin/sh}" -l
+}
+
+prepare_screen_config() {
+  screenrc_dir="$HOME/.ssh-wrapper"
+  screenrc_file="$screenrc_dir/screenrc-ssh-wrapper"
+
+  (umask 077 && mkdir -p "$screenrc_dir") || return 1
+  {
+    # -c replaces ~/.screenrc, so preserve the user's existing configuration.
+    [ -r "$HOME/.screenrc" ] && printf 'source %s\n' "$HOME/.screenrc"
+    # Prevent iTerm from entering alternate mouse-scroll mode for screen.
+    # In termcap notation ti/te correspond to enter/leave alternate screen.
+    printf 'termcapinfo xterm* ti@:te@\n'
+  } > "$screenrc_file" || return 1
+}
+
+fallback_notice() {
+  requested="$1"
+  reason="$2"
+  fallback="$3"
+  printf '%s not available (%s). Press a key to %s...' \
+    "$requested" "$reason" "$fallback" >&2
+  read -r -n 1 ignored
+  printf '\n' >&2
+}
+
+run_screen_or_fallback() {
+  requested="$1"
+  shift
+  # Keep screen as the direct remote program, as in the original wrapper.
+  # If exec succeeds this shell is replaced; if it fails the fallback below
+  # can still explain what happened before opening a normal shell.
+  printf '\033]0;%s@%s\007' "$(id -un)" "$(hostname -s)"
+  exec screen -c "$screenrc_file" "$@"
+  screen_status=$?
+  fallback_notice "$requested" "screen exited with status $screen_status" "open a normal shell"
+  normal_shell
+}
+
+new_screen_session() {
+  run_screen_or_fallback "Create new screen session" \
+    -q -e '^Bb' -S "${default_session}_$(date +%s)" "${SHELL:-/bin/sh}" -l
+}
+
+choose_from_list() {
+  sessions="$1"
+  listing="$2"
+  # This function is called through command substitution.  Keep the menu on
+  # stderr so stdout contains only the selected session name.
+  printf '\nAvailable sessions:\n' >&2
+  printf '%s\n' "$listing" | awk '
+    /^[[:space:]]*[[:digit:]]+\./ { printf "  %d) %s\n", ++count, $0 }
+  ' >&2
+  printf 'Session number (empty to cancel): ' >&2
+  read number
+  case "$number" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  selected=$(printf '%s\n' "$sessions" | sed -n "${number}p")
+  [ -n "$selected" ] || return 1
+  printf '%s\n' "$selected"
+}
+
+case "$action" in
+  4) normal_shell ;;
+esac
+
+if ! command -v screen >/dev/null 2>&1; then
+  fallback_notice "Screen session" "screen is not installed on the remote host" "open a normal shell"
+  normal_shell
+fi
+
+if ! prepare_screen_config; then
+  fallback_notice "Screen session" "cannot prepare the screen configuration" "open a normal shell"
+  normal_shell
+fi
+
+case "$action" in
+  1)
+    # -xRR attaches to the named session when present, otherwise creates it.
+    run_screen_or_fallback "Recover or create screen session" \
+      -q -e '^Bb' -xRR -S "$default_session" "${SHELL:-/bin/sh}" -l
+    ;;
+  2)
+    new_screen_session
+    ;;
+  3)
+    listing=$(screen -ls 2>&1)
+    sessions=$(printf '%s\n' "$listing" | awk '/[[:digit:]]+\./ { print $1 }')
+    if [ -z "$sessions" ]; then
+      fallback_notice "Choose screen session" "there are no active screen sessions" "create a new screen session"
+      new_screen_session
+    fi
+    selected=$(choose_from_list "$sessions" "$listing") || {
+      fallback_notice "Choose screen session" "no valid session was selected" "open a normal shell"
+      normal_shell
+    }
+    run_screen_or_fallback "Choose screen session" -q -e '^Bb' -x "$selected"
+    ;;
+  4|*) normal_shell ;;
+esac
+REMOTE_COMMAND
+REMOTE_SESSION_CMD=${REMOTE_SESSION_CMD//__SSH_WRAPPER_SESSION__/$muxSessionName}
+
+while true; do
+
+  choose_screen_action || break
+  remoteCommandForAction=${REMOTE_SESSION_CMD//__SSH_WRAPPER_ACTION__/$screenAction}
 
   echo "$SSHCMD" > $optdir/session.$itermSessionID
-  $SSHCMD
-  echo
-  read -n 1 -p "Press any key to reconnect or 'q' to quit. " a
+  $SSHCMD "$remoteCommandForAction"
   echo
 
 done
 
 rm -f $optdir/session.$itermSessionID
 exit 0
-
