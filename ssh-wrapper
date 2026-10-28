@@ -136,23 +136,50 @@ choose_screen_action() {
 IFS= read -r -d '' REMOTE_SESSION_CMD <<'REMOTE_COMMAND'
 default_session="__SSH_WRAPPER_SESSION__"
 action="__SSH_WRAPPER_ACTION__"
+mux="__SSH_WRAPPER_MUX__"
 
 normal_shell() {
   exec "${SHELL:-/bin/sh}" -l
 }
 
-prepare_screen_config() {
-  screenrc_dir="$HOME/.ssh-wrapper"
-  screenrc_file="$screenrc_dir/screenrc-ssh-wrapper"
+# auto prefers screen (the historical behaviour), then tmux.
+select_mux() {
+  case "$mux" in
+    screen|tmux)
+      command -v "$mux" >/dev/null 2>&1 || return 1
+      ;;
+    *)
+      if command -v screen >/dev/null 2>&1; then
+        mux=screen
+      elif command -v tmux >/dev/null 2>&1; then
+        mux=tmux
+      else
+        return 1
+      fi
+      ;;
+  esac
+}
 
-  (umask 077 && mkdir -p "$screenrc_dir") || return 1
-  {
-    # -c replaces ~/.screenrc, so preserve the user's existing configuration.
-    [ -r "$HOME/.screenrc" ] && printf 'source %s\n' "$HOME/.screenrc"
-    # Prevent iTerm from entering alternate mouse-scroll mode for screen.
-    # In termcap notation ti/te correspond to enter/leave alternate screen.
-    printf 'termcapinfo xterm* ti@:te@\n'
-  } > "$screenrc_file" || return 1
+prepare_config() {
+  config_dir="$HOME/.ssh-wrapper"
+  (umask 077 && mkdir -p "$config_dir") || return 1
+  if [ "$mux" = tmux ]; then
+    config_file="$config_dir/tmux-ssh-wrapper.conf"
+    {
+      [ -r "$HOME/.tmux.conf" ] && printf 'source-file %s\n' "$HOME/.tmux.conf"
+      # Prevent iTerm from entering alternate mouse-scroll mode.
+      printf "set -ga terminal-overrides ',xterm*:smcup@:rmcup@'\n"
+    } > "$config_file" || return 1
+  else
+    config_file="$config_dir/screenrc-ssh-wrapper"
+    {
+      # -c replaces ~/.screenrc, so preserve the user's existing configuration.
+      [ -r "$HOME/.screenrc" ] && printf 'source %s\n' "$HOME/.screenrc"
+      # Prevent iTerm from entering alternate mouse-scroll mode for screen.
+      # In termcap notation ti/te correspond to enter/leave alternate screen.
+      printf 'termcapinfo xterm* ti@:te@\n'
+    } > "$config_file" || return 1
+  fi
 }
 
 fallback_notice() {
@@ -165,35 +192,64 @@ fallback_notice() {
   printf '\n' >&2
 }
 
-run_screen_or_fallback() {
+run_mux_or_fallback() {
   requested="$1"
   shift
-  # Keep screen as the direct remote program, as in the original wrapper.
-  # If exec succeeds this shell is replaced; if it fails the fallback below
-  # can still explain what happened before opening a normal shell.
+  # Keep the multiplexer as the direct remote program, as in the original
+  # wrapper. If exec succeeds this shell is replaced; if it fails the fallback
+  # below can still explain what happened before opening a normal shell.
   printf '\033]0;%s@%s\007' "$(id -un)" "$(hostname -s)"
-  exec screen -c "$screenrc_file" "$@"
-  screen_status=$?
-  fallback_notice "$requested" "screen exited with status $screen_status" "open a normal shell"
+  exec "$@"
+  mux_status=$?
+  fallback_notice "$requested" "$mux exited with status $mux_status" "open a normal shell"
   normal_shell
 }
 
-new_screen_session() {
-  run_screen_or_fallback "Create new screen session" \
-    -q -e '^Bb' -S "${default_session}_$(date +%s)" "${SHELL:-/bin/sh}" -l
+# Each mux_* function runs a multiplexer command; "$1" is the requested action.
+mux_recover() {
+  # Attach to the named session when present, otherwise create it.
+  if [ "$mux" = tmux ]; then
+    run_mux_or_fallback "$1" tmux -f "$config_file" new-session -A -s "$default_session" "${SHELL:-/bin/sh} -l"
+  else
+    run_mux_or_fallback "$1" screen -c "$config_file" -q -e '^Bb' -xRR -S "$default_session" "${SHELL:-/bin/sh}" -l
+  fi
+}
+
+mux_create() {
+  new_name="${default_session}_$(date +%Y%m%d-%H%M%S)"
+  if [ "$mux" = tmux ]; then
+    run_mux_or_fallback "Create new $mux session" tmux -f "$config_file" new-session -s "$new_name" "${SHELL:-/bin/sh} -l"
+  else
+    run_mux_or_fallback "Create new $mux session" screen -c "$config_file" -q -e '^Bb' -S "$new_name" "${SHELL:-/bin/sh}" -l
+  fi
+}
+
+mux_attach() {
+  if [ "$mux" = tmux ]; then
+    run_mux_or_fallback "Choose $mux session" tmux -f "$config_file" attach-session -t "$1"
+  else
+    run_mux_or_fallback "Choose $mux session" screen -c "$config_file" -q -e '^Bb' -x "$1"
+  fi
+}
+
+# Sets "listing" (one display line per session) and "sessions" (their names).
+mux_list() {
+  if [ "$mux" = tmux ]; then
+    sessions=$(tmux list-sessions -F '#{session_name}' 2>/dev/null)
+    listing=$(tmux list-sessions -F '#{session_name} (#{t:session_created}) (#{?session_attached,Attached,Detached})' 2>/dev/null)
+  else
+    listing=$(screen -ls 2>&1 | awk '/^[[:space:]]*[[:digit:]]+\./')
+    sessions=$(printf '%s\n' "$listing" | awk '{ print $1 }')
+  fi
 }
 
 choose_from_list() {
-  sessions="$1"
-  listing="$2"
   # This function is called through command substitution.  Keep the menu on
   # stderr so stdout contains only the selected session name.
   printf '\nAvailable sessions:\n' >&2
-  printf '%s\n' "$listing" | awk '
-    /^[[:space:]]*[[:digit:]]+\./ { printf "  %d) %s\n", ++count, $0 }
-  ' >&2
+  printf '%s\n' "$listing" | awk '{ printf "  %d) %s\n", NR, $0 }' >&2
   printf 'Session number (empty to cancel): ' >&2
-  read number
+  read -r number
   case "$number" in
     ''|*[!0-9]*) return 1 ;;
   esac
@@ -206,42 +262,41 @@ case "$action" in
   4) normal_shell ;;
 esac
 
-if ! command -v screen >/dev/null 2>&1; then
-  fallback_notice "Screen session" "screen is not installed on the remote host" "open a normal shell"
+if ! select_mux; then
+  fallback_notice "Session" "no usable screen or tmux on the remote host" "open a normal shell"
   normal_shell
 fi
 
-if ! prepare_screen_config; then
-  fallback_notice "Screen session" "cannot prepare the screen configuration" "open a normal shell"
+if ! prepare_config; then
+  fallback_notice "Session" "cannot prepare the $mux configuration" "open a normal shell"
   normal_shell
 fi
 
 case "$action" in
-  1)
-    # -xRR attaches to the named session when present, otherwise creates it.
-    run_screen_or_fallback "Recover or create screen session" \
-      -q -e '^Bb' -xRR -S "$default_session" "${SHELL:-/bin/sh}" -l
-    ;;
-  2)
-    new_screen_session
-    ;;
+  1) mux_recover "Recover or create $mux session" ;;
+  2) mux_create ;;
   3)
-    listing=$(screen -ls 2>&1)
-    sessions=$(printf '%s\n' "$listing" | awk '/[[:digit:]]+\./ { print $1 }')
+    mux_list
     if [ -z "$sessions" ]; then
-      fallback_notice "Choose screen session" "there are no active screen sessions" "create a new screen session"
-      new_screen_session
+      fallback_notice "Choose $mux session" "there are no active sessions" "create a new session"
+      mux_create
     fi
-    selected=$(choose_from_list "$sessions" "$listing") || {
-      fallback_notice "Choose screen session" "no valid session was selected" "open a normal shell"
+    selected=$(choose_from_list) || {
+      fallback_notice "Choose $mux session" "no valid session was selected" "open a normal shell"
       normal_shell
     }
-    run_screen_or_fallback "Choose screen session" -q -e '^Bb' -x "$selected"
+    mux_attach "$selected"
     ;;
   4|*) normal_shell ;;
 esac
 REMOTE_COMMAND
 REMOTE_SESSION_CMD=${REMOTE_SESSION_CMD//__SSH_WRAPPER_SESSION__/$muxSessionName}
+
+# Multiplexer preference: screen, tmux or auto (default), set in this file.
+muxChoice=auto
+[ -r "$optdir/multiplexer" ] && read -r muxChoice < "$optdir/multiplexer"
+case "$muxChoice" in screen|tmux) ;; *) muxChoice=auto ;; esac
+REMOTE_SESSION_CMD=${REMOTE_SESSION_CMD//__SSH_WRAPPER_MUX__/$muxChoice}
 
 while true; do
 
