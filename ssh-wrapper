@@ -44,6 +44,26 @@ ssh_copy_id_func() {
   return 0
 }
 
+# Session file format: first line is the host as typed, then one ssh argument
+# per line. Old files held a single "ssh ..." line, which is split on spaces.
+save_session() {
+  { printf '%s\n' "$h"; printf '%s\n' "${SSHCMD[@]}"; } > "$1"
+}
+
+load_session() {
+  local line first=1 args=()
+  while IFS= read -r line; do
+    if [ $first -eq 1 ]; then h=$line; first=0; else args+=("$line"); fi
+  done < "$1"
+  if [ ${#args[@]} -eq 0 ]; then
+    # shellcheck disable=SC2206
+    args=($h)
+    h=${args[${#args[@]}-1]}
+  fi
+  [ "${args[1]}" = "-t" ] || args=("${args[0]}" -t "${args[@]:1}")
+  SSHCMD=("${args[@]}")
+}
+
 if [ ! -f "$optdir/session.$itermSessionID" ]; then
 
   histfile="$optdir/${progname}_history"
@@ -83,13 +103,12 @@ if [ ! -f "$optdir/session.$itermSessionID" ]; then
 
   fi
 
-  # shellcheck disable=SC2086
-  SSHCMD="ssh -t ${sshopt[*]} $h"
+  # shellcheck disable=SC2206
+  SSHCMD=(ssh -t "${sshopt[@]}" $h)
 
 else
 
-  SSHCMD=$(cat "$optdir/session.$itermSessionID")
-  [[ "$SSHCMD" == ssh\ -t\ * ]] || SSHCMD="${SSHCMD/ssh /ssh -t }"
+  load_session "$optdir/session.$itermSessionID"
   touch "$optdir/session.restore.time"
 
 fi
@@ -229,9 +248,11 @@ while true; do
   choose_screen_action || break
   remoteCommandForAction=${REMOTE_SESSION_CMD//__SSH_WRAPPER_ACTION__/$screenAction}
 
-  echo "$SSHCMD" > "$optdir/session.$itermSessionID"
-  $SSHCMD "$remoteCommandForAction"
+  save_session "$optdir/session.$itermSessionID"
+  "${SSHCMD[@]}" "$remoteCommandForAction"
+  sshStatus=$?
   echo
+  [ $sshStatus -ne 0 ] && printf 'ssh exited with status %s\n' "$sshStatus" >&2
 
 done
 
