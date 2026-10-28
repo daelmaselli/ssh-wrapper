@@ -8,7 +8,10 @@ progname=$(basename "$0")
 itermSessionID=${TERM_SESSION_ID#*:}
 [ -z "$itermSessionID" ] && itermSessionID="pid_$$"
 muxSessionName="ssh_wrapper_$(printf '%s' "$itermSessionID" | tr -c '[:alnum:]_-' '_')"
-mkdir -p "$optdir"
+mkdir -p "$optdir" && chmod 700 "$optdir"
+
+# Remove session files left behind by terminals closed long ago.
+find "$optdir" -maxdepth 1 -name 'session.*' ! -name session.restore.time -mtime +30 -exec rm -f {} + 2>/dev/null
 
 ssh_copy_id_func() {
   local key pkey r answer
@@ -74,8 +77,10 @@ if [ ! -f "$optdir/session.$itermSessionID" ]; then
     read -r -e -p "Host: " h
   done
 
+  # Keep one entry per host, with the most recent at the end.
   if [ "$(tail -n 1 "$histfile" 2>/dev/null)" != "$h" ]; then
-    echo "$h" >> "$histfile"
+    { grep -vxF -- "$h" "$histfile" 2>/dev/null; echo "$h"; } > "$histfile.tmp" &&
+      mv "$histfile.tmp" "$histfile"
   fi
 
   sshopt=()
@@ -298,13 +303,20 @@ muxChoice=auto
 case "$muxChoice" in screen|tmux) ;; *) muxChoice=auto ;; esac
 REMOTE_SESSION_CMD=${REMOTE_SESSION_CMD//__SSH_WRAPPER_MUX__/$muxChoice}
 
+# Opt-in SSH connection sharing: create "$optdir/multiplex" to enable it for
+# every host, or "$optdir/<host>.multiplex" for a single one.
+muxOpts=()
+if [ -e "$optdir/multiplex" ] || [ -e "$optdir/$h.multiplex" ]; then
+  muxOpts=(-o ControlMaster=auto -o "ControlPath=$optdir/cm-%C" -o ControlPersist=10m)
+fi
+
 while true; do
 
   choose_screen_action || break
   remoteCommandForAction=${REMOTE_SESSION_CMD//__SSH_WRAPPER_ACTION__/$screenAction}
 
   save_session "$optdir/session.$itermSessionID"
-  "${SSHCMD[@]}" "$remoteCommandForAction"
+  "${SSHCMD[0]}" "${muxOpts[@]}" "${SSHCMD[@]:1}" "$remoteCommandForAction"
   sshStatus=$?
   echo
   [ $sshStatus -ne 0 ] && printf 'ssh exited with status %s\n' "$sshStatus" >&2
