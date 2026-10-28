@@ -1,91 +1,96 @@
 #!/bin/bash
 
-[ -n "$*" ] && h="$*"
+h="$*"
 
-set noglog; #eval `resize`
+optdir="$HOME/.ssh-wrapper"
 
-PKEY="$HOME/.ssh/id_rsa"
-KEY="$HOME/.ssh/id_rsa.pub"
-optdir=$HOME/.ssh-wrapper
-
-progname=`basename $0`
+progname=$(basename "$0")
 itermSessionID=${TERM_SESSION_ID#*:}
 [ -z "$itermSessionID" ] && itermSessionID="pid_$$"
 muxSessionName="ssh_wrapper_$(printf '%s' "$itermSessionID" | tr -c '[:alnum:]_-' '_')"
-mkdir -p $optdir
+mkdir -p "$optdir"
 
-function ssh_copy_id_func {
+ssh_copy_id_func() {
+  local key pkey r answer
 
-  if [ ! -f $KEY ];then
-      echo "private key not found at $KEY"
-      echo "* please create it with \"ssh-keygen -t rsa\" *"
-      return
+  for pkey in "$HOME/.ssh/id_ed25519" "$HOME/.ssh/id_ecdsa" "$HOME/.ssh/id_rsa"; do
+    [ -f "$pkey.pub" ] && break
+  done
+  key="$pkey.pub"
+
+  if [ ! -f "$key" ]; then
+    echo "public key not found in $HOME/.ssh"
+    echo '* please create it with "ssh-keygen -t ed25519" *'
+    return 0
   fi
 
-  ssh-add -l | grep -q "The agent has no identities."
-  [ $? == 0 ] && ssh-add $PKEY
+  # ssh-add -l exits with 1 when the agent is reachable but has no identities.
+  ssh-add -l >/dev/null 2>&1
+  [ $? -eq 1 ] && ssh-add "$pkey"
 
-  r=`ssh $* -x -K -o PasswordAuthentication=no -o NumberOfPasswordPrompts=0 true 2>&1`
-  [ $? == 0 ] && return
+  r=$(ssh "$@" -x -o PasswordAuthentication=no -o NumberOfPasswordPrompts=0 true 2>&1) && return 0
 
-  echo $r | grep -q "Could not resolve hostname" && exit 1
+  case "$r" in
+    *"Could not resolve hostname"*) return 1 ;;
+  esac
 
-  read -p "Do you want to add $KEY to $*:~/.ssh/authorized_keys? [y/N] " risp
-  [ "x$risp" != "xy" ] && [ "x$risp" != "xY" ] && return
+  read -r -p "Do you want to add $key to $*:~/.ssh/authorized_keys? [y/N] " answer
+  [ "$answer" != "y" ] && [ "$answer" != "Y" ] && return 0
 
-  ssh -q -x $* "umask 0077; mkdir -p ~/.ssh ; echo "`cat $KEY`" >> ~/.ssh/authorized_keys"
-  [ $? == 0 ] || return
-  echo "PublicKey added!"
+  # shellcheck disable=SC2016  # expanded on the remote host
+  if ssh -q -x "$@" 'umask 077; mkdir -p ~/.ssh; cat >> ~/.ssh/authorized_keys' < "$key"; then
+    echo "PublicKey added!"
+  fi
+  return 0
 }
 
-if [ ! -f $optdir/session.$itermSessionID ]; then
+if [ ! -f "$optdir/session.$itermSessionID" ]; then
 
-  histfile=$optdir/${progname}_history
+  histfile="$optdir/${progname}_history"
 
-  history -r $histfile
+  history -r "$histfile"
 
   while [ -z "$h" ]; do
-    read -e -p "Host: " h
+    read -r -e -p "Host: " h
   done
 
-  if [ "`tail -1 $histfile`" != "$h" ]; then
-    echo $h >> $histfile
+  if [ "$(tail -n 1 "$histfile" 2>/dev/null)" != "$h" ]; then
+    echo "$h" >> "$histfile"
   fi
 
+  sshopt=()
   if [ "$progname" == "ssh-root" ]; then
-    sshopt="-l root"
+    sshopt=(-l root)
   fi
-  
-  ssh_copy_id_func $sshopt $h
-  
-  if [ $? == 0 ]; then
-  
+
+  # $h may hold several words (host plus options), so it is split on purpose.
+  # shellcheck disable=SC2086
+  if ssh_copy_id_func "${sshopt[@]}" $h; then
+
     if [ -e "$optdir/$h.def-fwd-ssh-agent" ]; then
-  
-            sshopt="$sshopt -A"
-  
+
+      sshopt+=(-A)
+
     else
-  
-      read -p "Do you want to forward ssh-agent to $h? [y/a/N] " risp
-      if [ "x$risp" == "xa" ] || [ "x$risp" == "xA" ]; then
-        sshopt="$sshopt -A"
-        touch "$optdir/$h.def-fwd-ssh-agent"
-      fi
-      if [ "x$risp" == "xy" ] || [ "x$risp" == "xY" ]; then
-        sshopt="$sshopt -A"
-      fi
-  
+
+      read -r -p "Do you want to forward ssh-agent to $h? [y/a/N] " answer
+      case "$answer" in
+        a|A) sshopt+=(-A); touch "$optdir/$h.def-fwd-ssh-agent" ;;
+        y|Y) sshopt+=(-A) ;;
+      esac
+
     fi
-  
+
   fi
-  
-  SSHCMD="ssh -t $sshopt $h"
+
+  # shellcheck disable=SC2086
+  SSHCMD="ssh -t ${sshopt[*]} $h"
 
 else
 
-  SSHCMD=`cat $optdir/session.$itermSessionID`
+  SSHCMD=$(cat "$optdir/session.$itermSessionID")
   [[ "$SSHCMD" == ssh\ -t\ * ]] || SSHCMD="${SSHCMD/ssh /ssh -t }"
-  touch $optdir/session.restore.time
+  touch "$optdir/session.restore.time"
 
 fi
 
@@ -224,11 +229,11 @@ while true; do
   choose_screen_action || break
   remoteCommandForAction=${REMOTE_SESSION_CMD//__SSH_WRAPPER_ACTION__/$screenAction}
 
-  echo "$SSHCMD" > $optdir/session.$itermSessionID
+  echo "$SSHCMD" > "$optdir/session.$itermSessionID"
   $SSHCMD "$remoteCommandForAction"
   echo
 
 done
 
-rm -f $optdir/session.$itermSessionID
+rm -f "$optdir/session.$itermSessionID"
 exit 0
