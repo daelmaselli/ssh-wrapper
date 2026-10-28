@@ -14,3 +14,24 @@ a session falls back to a normal shell if `screen` cannot start; choosing from
 an empty list falls back to creating a new session. The list includes the time
 and Attached/Detached status reported by `screen -ls`. New `screen` windows
 explicitly start the remote user's login shell.
+
+## Files in `~/.ssh-wrapper`
+
+| File | Purpose |
+|---|---|
+| `ssh-wrapper_history`, `ssh-root_history` | Host history (one entry per host) |
+| `session.<iTerm id>` | Host and ssh arguments of an iTerm session, used to reconnect; removed on exit, stale ones are deleted after 30 days |
+| `<host>.def-fwd-ssh-agent` | Always forward the ssh-agent to `<host>` |
+| `multiplexer` | Contents `screen`, `tmux` or `auto` (default: `screen` if present, otherwise `tmux`) |
+| `multiplex` / `<host>.multiplex` | Create it to enable SSH connection sharing (`ControlMaster`, 10 minutes `ControlPersist`) for all hosts or for one host. Needs `MaxSessions` > 1 on the server |
+
+The public key used for `authorized_keys` is the first found among
+`id_ed25519`, `id_ecdsa` and `id_rsa`. With `tmux`, the menu behaves like with
+`screen`; the prefix key is the tmux default (`Ctrl-b`).
+
+## Development
+
+```
+shellcheck ssh-wrapper tests/run.sh
+tests/run.sh
+```

@@ -1,84 +1,129 @@
 #!/bin/bash
 
-[ -n "$*" ] && h="$*"
+h="$*"
 
-set noglog; #eval `resize`
+optdir="$HOME/.ssh-wrapper"
 
-PKEY="$HOME/.ssh/id_rsa"
-KEY="$HOME/.ssh/id_rsa.pub"
-optdir=$HOME/.ssh-wrapper
-
-progname=`basename $0`
+progname=$(basename "$0")
 itermSessionID=${TERM_SESSION_ID#*:}
 [ -z "$itermSessionID" ] && itermSessionID="pid_$$"
 muxSessionName="ssh_wrapper_$(printf '%s' "$itermSessionID" | tr -c '[:alnum:]_-' '_')"
-mkdir -p $optdir
+mkdir -p "$optdir" && chmod 700 "$optdir"
 
-function ssh_copy_id_func {
-  if [ ! -f $KEY ];then
-    echo "private key not found at $KEY"
-    echo '* please create it with "ssh-keygen -t rsa" *'
-    return
+# Remove session files left behind by terminals closed long ago.
+find "$optdir" -maxdepth 1 -name 'session.*' ! -name session.restore.time -mtime +30 -exec rm -f {} + 2>/dev/null
+
+ssh_copy_id_func() {
+  local key pkey r answer
+
+  for pkey in "$HOME/.ssh/id_ed25519" "$HOME/.ssh/id_ecdsa" "$HOME/.ssh/id_rsa"; do
+    [ -f "$pkey.pub" ] && break
+  done
+  key="$pkey.pub"
+
+  if [ ! -f "$key" ]; then
+    echo "public key not found in $HOME/.ssh"
+    echo '* please create it with "ssh-keygen -t ed25519" *'
+    return 0
   fi
 
-  ssh-add -l | grep -q "The agent has no identities."
-  [ $? == 0 ] && ssh-add $PKEY
+  # ssh-add -l exits with 1 when the agent is reachable but has no identities.
+  ssh-add -l >/dev/null 2>&1
+  [ $? -eq 1 ] && ssh-add "$pkey"
 
-  r=`ssh $* -x -K -o PasswordAuthentication=no -o NumberOfPasswordPrompts=0 true 2>&1`
-  [ $? == 0 ] && return
+  r=$(ssh "$@" -x -o PasswordAuthentication=no -o NumberOfPasswordPrompts=0 true 2>&1) && return 0
 
-  echo $r | grep -q "Could not resolve hostname" && exit 1
+  case "$r" in
+    *"Could not resolve hostname"*) return 1 ;;
+  esac
 
-  read -p "Do you want to add $KEY to $*:~/.ssh/authorized_keys? [y/N] " risp
-  [ "x$risp" != "xy" ] && [ "x$risp" != "xY" ] && return
-  ssh -q -x $* "umask 0077; mkdir -p ~/.ssh ; echo "`cat $KEY`" >> ~/.ssh/authorized_keys"
-  [ $? == 0 ] || return
-  echo "PublicKey added!"
+  read -r -p "Do you want to add $key to $*:~/.ssh/authorized_keys? [y/N] " answer
+  [ "$answer" != "y" ] && [ "$answer" != "Y" ] && return 0
+
+  # shellcheck disable=SC2016  # expanded on the remote host
+  if ssh -q -x "$@" 'umask 077; mkdir -p ~/.ssh; cat >> ~/.ssh/authorized_keys' < "$key"; then
+    echo "PublicKey added!"
+  fi
+  return 0
 }
 
-if [ ! -f $optdir/session.$itermSessionID ]; then
-  histfile=$optdir/${progname}_history
-  history -r $histfile
+# Session file format: first line is the host as typed, then one ssh argument
+# per line. Old files held a single "ssh ..." line, which is split on spaces.
+save_session() {
+  { printf '%s\n' "$h"; printf '%s\n' "${SSHCMD[@]}"; } > "$1"
+}
+
+load_session() {
+  local line first=1 args=()
+  while IFS= read -r line; do
+    if [ $first -eq 1 ]; then h=$line; first=0; else args+=("$line"); fi
+  done < "$1"
+  if [ ${#args[@]} -eq 0 ]; then
+    # shellcheck disable=SC2206
+    args=($h)
+    h=${args[${#args[@]}-1]}
+  fi
+  [ "${args[1]}" = "-t" ] || args=("${args[0]}" -t "${args[@]:1}")
+  SSHCMD=("${args[@]}")
+}
+
+if [ ! -f "$optdir/session.$itermSessionID" ]; then
+
+  histfile="$optdir/${progname}_history"
+
+  history -r "$histfile"
 
   while [ -z "$h" ]; do
-    read -e -p "Host: " h
+    read -r -e -p "Host: " h
   done
 
-  if [ "`tail -1 $histfile`" != "$h" ]; then
-    echo $h >> $histfile
+  # Keep one entry per host, with the most recent at the end.
+  if [ "$(tail -n 1 "$histfile" 2>/dev/null)" != "$h" ]; then
+    { grep -vxF -- "$h" "$histfile" 2>/dev/null; echo "$h"; } > "$histfile.tmp" &&
+      mv "$histfile.tmp" "$histfile"
   fi
 
+  sshopt=()
   if [ "$progname" == "ssh-root" ]; then
-    sshopt="-l root"
+    sshopt=(-l root)
   fi
 
-  ssh_copy_id_func $sshopt $h
+  # $h may hold several words (host plus options), so it is split on purpose.
+  # shellcheck disable=SC2086
+  if ssh_copy_id_func "${sshopt[@]}" $h; then
 
-  if [ $? == 0 ]; then
     if [ -e "$optdir/$h.def-fwd-ssh-agent" ]; then
-      sshopt="$sshopt -A"
+
+      sshopt+=(-A)
+
     else
-      read -p "Do you want to forward ssh-agent to $h? [y/a/N] " risp
-      if [ "x$risp" == "xa" ] || [ "x$risp" == "xA" ]; then
-        sshopt="$sshopt -A"
-        touch "$optdir/$h.def-fwd-ssh-agent"
-      fi
-      if [ "x$risp" == "xy" ] || [ "x$risp" == "xY" ]; then
-        sshopt="$sshopt -A"
-      fi
+
+      read -r -p "Do you want to forward ssh-agent to $h? [y/a/N] " answer
+      case "$answer" in
+        a|A) sshopt+=(-A); touch "$optdir/$h.def-fwd-ssh-agent" ;;
+        y|Y) sshopt+=(-A) ;;
+      esac
+
     fi
+
   fi
 
-  SSHCMD="ssh -t $sshopt $h"
+  # shellcheck disable=SC2206
+  SSHCMD=(ssh -t "${sshopt[@]}" $h)
+
 else
-  SSHCMD=`cat $optdir/session.$itermSessionID`
-  [[ "$SSHCMD" == ssh\ -t\ * ]] || SSHCMD="${SSHCMD/ssh /ssh -t }"
-  touch $optdir/session.restore.time
+
+  load_session "$optdir/session.$itermSessionID"
+  touch "$optdir/session.restore.time"
+
 fi
 
 choose_screen_action() {
+  # This is intentionally local and is called before every interactive SSH
+  # connection, including after a dropped remote session.
   while true; do
     printf '\nScreen: [Enter or r] recover or create, [c] create new, [l] list, [s] shell, [q] quit: '
+    # EOF (closed terminal) must quit, not loop on the default choice.
     read -r -n 1 screenAction || return 1
     printf '\n'
 
@@ -97,20 +142,50 @@ choose_screen_action() {
 IFS= read -r -d '' REMOTE_SESSION_CMD <<'REMOTE_COMMAND'
 default_session="__SSH_WRAPPER_SESSION__"
 action="__SSH_WRAPPER_ACTION__"
+mux="__SSH_WRAPPER_MUX__"
 
 normal_shell() {
   exec "${SHELL:-/bin/sh}" -l
 }
 
-prepare_screen_config() {
-  screenrc_dir="$HOME/.ssh-wrapper"
-  screenrc_file="$screenrc_dir/screenrc-ssh-wrapper"
-  (umask 077 && mkdir -p "$screenrc_dir") || return 1
-  {
-    # Preserve the user's existing configuration.
-    [ -r "$HOME/.screenrc" ] && printf 'source %s\n' "$HOME/.screenrc"
-    printf 'termcapinfo xterm* ti@:te@\n'
-  } > "$screenrc_file" || return 1
+# auto prefers screen (the historical behaviour), then tmux.
+select_mux() {
+  case "$mux" in
+    screen|tmux)
+      command -v "$mux" >/dev/null 2>&1 || return 1
+      ;;
+    *)
+      if command -v screen >/dev/null 2>&1; then
+        mux=screen
+      elif command -v tmux >/dev/null 2>&1; then
+        mux=tmux
+      else
+        return 1
+      fi
+      ;;
+  esac
+}
+
+prepare_config() {
+  config_dir="$HOME/.ssh-wrapper"
+  (umask 077 && mkdir -p "$config_dir") || return 1
+  if [ "$mux" = tmux ]; then
+    config_file="$config_dir/tmux-ssh-wrapper.conf"
+    {
+      [ -r "$HOME/.tmux.conf" ] && printf 'source-file %s\n' "$HOME/.tmux.conf"
+      # Prevent iTerm from entering alternate mouse-scroll mode.
+      printf "set -ga terminal-overrides ',xterm*:smcup@:rmcup@'\n"
+    } > "$config_file" || return 1
+  else
+    config_file="$config_dir/screenrc-ssh-wrapper"
+    {
+      # -c replaces ~/.screenrc, so preserve the user's existing configuration.
+      [ -r "$HOME/.screenrc" ] && printf 'source %s\n' "$HOME/.screenrc"
+      # Prevent iTerm from entering alternate mouse-scroll mode for screen.
+      # In termcap notation ti/te correspond to enter/leave alternate screen.
+      printf 'termcapinfo xterm* ti@:te@\n'
+    } > "$config_file" || return 1
+  fi
 }
 
 fallback_notice() {
@@ -123,32 +198,65 @@ fallback_notice() {
   printf '\n' >&2
 }
 
-run_screen_or_fallback() {
+run_mux_or_fallback() {
   requested="$1"
   shift
+  # Keep the multiplexer as the direct remote program, as in the original
+  # wrapper. If exec succeeds this shell is replaced; if it fails the fallback
+  # below can still explain what happened before opening a normal shell.
   printf '\033]0;%s@%s\007' "$(id -un)" "$(hostname -s)"
   export COLORFGBG='15;0'
-  exec screen -U -c "$screenrc_file" "$@"
-  screen_status=$?
-  fallback_notice "$requested" "screen exited with status $screen_status" "open a normal shell"
+  exec "$@"
+  mux_status=$?
+  fallback_notice "$requested" "$mux exited with status $mux_status" "open a normal shell"
   normal_shell
 }
 
-new_screen_session() {
-  run_screen_or_fallback "Create new screen session" \
-    -q -e '^Bb' -S "${default_session}_$(date +%s)" "${SHELL:-/bin/sh}" -l
+# Each mux_* function runs a multiplexer command; "$1" is the requested action.
+mux_recover() {
+  # Attach to the named session when present, otherwise create it.
+  if [ "$mux" = tmux ]; then
+    run_mux_or_fallback "$1" tmux -f "$config_file" new-session -A -s "$default_session" "${SHELL:-/bin/sh} -l"
+  else
+    run_mux_or_fallback "$1" screen -U -c "$config_file" -q -e '^Bb' -xRR -S "$default_session" "${SHELL:-/bin/sh}" -l
+  fi
+}
+
+mux_create() {
+  new_name="${default_session}_$(date +%Y%m%d-%H%M%S)"
+  if [ "$mux" = tmux ]; then
+    run_mux_or_fallback "Create new $mux session" tmux -f "$config_file" new-session -s "$new_name" "${SHELL:-/bin/sh} -l"
+  else
+    run_mux_or_fallback "Create new $mux session" screen -U -c "$config_file" -q -e '^Bb' -S "$new_name" "${SHELL:-/bin/sh}" -l
+  fi
+}
+
+mux_attach() {
+  if [ "$mux" = tmux ]; then
+    run_mux_or_fallback "Choose $mux session" tmux -f "$config_file" attach-session -t "$1"
+  else
+    run_mux_or_fallback "Choose $mux session" screen -U -c "$config_file" -q -e '^Bb' -x "$1"
+  fi
+}
+
+# Sets "listing" (one display line per session) and "sessions" (their names).
+mux_list() {
+  if [ "$mux" = tmux ]; then
+    sessions=$(tmux list-sessions -F '#{session_name}' 2>/dev/null)
+    listing=$(tmux list-sessions -F '#{session_name} (#{t:session_created}) (#{?session_attached,Attached,Detached})' 2>/dev/null)
+  else
+    listing=$(screen -ls 2>&1 | awk '/^[[:space:]]*[[:digit:]]+\./')
+    sessions=$(printf '%s\n' "$listing" | awk '{ print $1 }')
+  fi
 }
 
 choose_from_list() {
-  sessions="$1"
-  listing="$2"
-  # Keep the menu on stderr; stdout contains only the selected session.
+  # This function is called through command substitution.  Keep the menu on
+  # stderr so stdout contains only the selected session name.
   printf '\nAvailable sessions:\n' >&2
-  printf '%s\n' "$listing" | awk '
-    /^[[:space:]]*[[:digit:]]+\./ { printf " %d) %s\n", ++count, $0 }
-  ' >&2
+  printf '%s\n' "$listing" | awk '{ printf "  %d) %s\n", NR, $0 }' >&2
   printf 'Session number (empty to cancel): ' >&2
-  read number
+  read -r number
   case "$number" in
     ''|*[!0-9]*) return 1 ;;
   esac
@@ -161,52 +269,65 @@ case "$action" in
   4) normal_shell ;;
 esac
 
-if ! command -v screen >/dev/null 2>&1; then
-  fallback_notice "Screen session" "screen is not installed on the remote host" "open a normal shell"
+if ! select_mux; then
+  fallback_notice "Session" "no usable screen or tmux on the remote host" "open a normal shell"
   normal_shell
 fi
 
-if ! prepare_screen_config; then
-  fallback_notice "Screen session" "cannot prepare the screen configuration" "open a normal shell"
+if ! prepare_config; then
+  fallback_notice "Session" "cannot prepare the $mux configuration" "open a normal shell"
   normal_shell
 fi
 
 case "$action" in
-  1)
-    run_screen_or_fallback "Recover or create screen session" \
-      -q -e '^Bb' -xRR -S "$default_session" "${SHELL:-/bin/sh}" -l
-    ;;
-  2)
-    new_screen_session
-    ;;
+  1) mux_recover "Recover or create $mux session" ;;
+  2) mux_create ;;
   3)
-    listing=$(screen -ls 2>&1)
-    sessions=$(printf '%s\n' "$listing" | awk '/[[:digit:]]+\./ { print $1 }')
+    mux_list
     if [ -z "$sessions" ]; then
-      fallback_notice "Choose screen session" "there are no active screen sessions" "create a new screen session"
-      new_screen_session
+      fallback_notice "Choose $mux session" "there are no active sessions" "create a new session"
+      mux_create
     fi
-    selected=$(choose_from_list "$sessions" "$listing") || {
-      fallback_notice "Choose screen session" "no valid session was selected" "open a normal shell"
+    selected=$(choose_from_list) || {
+      fallback_notice "Choose $mux session" "no valid session was selected" "open a normal shell"
       normal_shell
     }
-    run_screen_or_fallback "Choose screen session" -q -e '^Bb' -x "$selected"
+    mux_attach "$selected"
     ;;
   4|*) normal_shell ;;
 esac
 REMOTE_COMMAND
-
 REMOTE_SESSION_CMD=${REMOTE_SESSION_CMD//__SSH_WRAPPER_SESSION__/$muxSessionName}
 
+# Multiplexer preference: screen, tmux or auto (default), set in this file.
+muxChoice=auto
+[ -r "$optdir/multiplexer" ] && read -r muxChoice < "$optdir/multiplexer"
+case "$muxChoice" in screen|tmux) ;; *) muxChoice=auto ;; esac
+REMOTE_SESSION_CMD=${REMOTE_SESSION_CMD//__SSH_WRAPPER_MUX__/$muxChoice}
+
+# Opt-in SSH connection sharing: create "$optdir/multiplex" to enable it for
+# every host, or "$optdir/<host>.multiplex" for a single one.
+muxOpts=()
+if [ -e "$optdir/multiplex" ] || [ -e "$optdir/$h.multiplex" ]; then
+  muxOpts=(-o ControlMaster=auto -o "ControlPath=$optdir/cm-%C" -o ControlPersist=10m)
+fi
+
 while true; do
+
   choose_screen_action || break
   remoteCommandForAction=${REMOTE_SESSION_CMD//__SSH_WRAPPER_ACTION__/$screenAction}
-  echo "$SSHCMD" > $optdir/session.$itermSessionID
-  $SSHCMD "$remoteCommandForAction"
+
+  save_session "$optdir/session.$itermSessionID"
+  "${SSHCMD[0]}" "${muxOpts[@]}" "${SSHCMD[@]:1}" "$remoteCommandForAction"
+  sshStatus=$?
   echo
+  [ $sshStatus -ne 0 ] && printf 'ssh exited with status %s\n' "$sshStatus" >&2
+  # Reload the wrapper (and any updated script) before showing the menu again.
+  # shellcheck disable=SC2093  # exec is intentional, the loop restarts the script
   exec bash "$0"
   exit 1
+
 done
 
-rm -f $optdir/session.$itermSessionID
+rm -f "$optdir/session.$itermSessionID"
 exit 0
