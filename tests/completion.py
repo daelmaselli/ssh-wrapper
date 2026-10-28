@@ -49,7 +49,9 @@ def check(typed, expected, *, root=False):
         os.close(slave)
         output = b""
         deadline = time.monotonic() + 5
-        sent = False
+        # Answer each prompt only after it appears: sending everything at once
+        # is racy because Readline may discard type-ahead (seen with bash 5).
+        steps = [(b"Host: ", typed + b"\n"), (b"[y/a/N]", b"n\n"), (b"Screen:", b"q")]
         try:
             while time.monotonic() < deadline:
                 if select.select([master], [], [], 0.1)[0]:
@@ -62,13 +64,13 @@ def check(typed, expected, *, root=False):
                     if not data:
                         break
                     output += data
-                    if not sent and b"Host: " in output:
+                    if steps and steps[0][0] in output:
                         # q exits before any SSH connection is started.
-                        os.write(master, typed + b"\nn\nq")
-                        sent = True
+                        os.write(master, steps.pop(0)[1])
+                        output = b""
                 if process.poll() is not None:
                     break
-            assert process.wait(timeout=1) == 0, output
+            assert process.wait(timeout=2) == 0, output
             assert history.read_text().splitlines()[-1] == expected, output
             assert not list(options.glob("hosts.*")), "temporary host list leaked"
         finally:
