@@ -67,15 +67,62 @@ load_session() {
   SSHCMD=("${args[@]}")
 }
 
+# Readline's hostname completion also handles user@host. Keep its input separate
+# from the command history so arrow keys still recall only previous connections.
+read_host() (
+  local HOSTFILE host file
+  local sources=()
+  HOSTFILE=$(mktemp "$optdir/hosts.XXXXXX") || return 1
+  trap 'rm -f "$HOSTFILE"' EXIT
+
+  for file in "$histfile" "$HOME/.ssh/known_hosts" "$HOME/.ssh/known_hosts2" \
+              /etc/ssh/ssh_known_hosts /etc/ssh/ssh_known_hosts2; do
+    [ -r "$file" ] && sources+=("$file")
+  done
+  if [ ${#sources[@]} -gt 0 ]; then
+    awk -v history_file="$histfile" '
+      function emit(host) {
+        sub(/^.*@/, "", host)
+        if (host ~ /^\[/) {
+          sub(/^\[/, "", host)
+          sub(/\]:[0-9]+$/, "", host)
+        }
+        if (host != "" && host !~ /[|*?!\/\[\]]/ && host !~ /^-/ && !seen[host]++)
+          print "0.0.0.0 " host
+      }
+      /^[[:space:]]*(#|$)/ { next }
+      FILENAME == history_file { emit($1); next }
+      $1 == "@revoked" { next }
+      {
+        field = ($1 ~ /^@/ ? $2 : $1)
+        count = split(field, hosts, ",")
+        for (i = 1; i <= count; i++) emit(hosts[i])
+      }
+    ' "${sources[@]}" > "$HOSTFILE"
+  fi
+
+  # Initialize Readline before binding keys in this non-interactive Bash script
+  # (including the Bash 3.2 shipped with macOS).
+  set -o emacs
+  # Colons belong to IPv6 addresses, rather than separating completion words.
+  COMP_WORDBREAKS=${COMP_WORDBREAKS//:/}
+  bind '"\C-i": complete-hostname'
+  while true; do
+    read -r -e -p "Host: " host || return 1
+    [ -n "$host" ] && break
+  done
+  printf '%s\n' "$host"
+)
+
 if [ ! -f "$optdir/session.$itermSessionID" ]; then
 
   histfile="$optdir/${progname}_history"
 
-  history -r "$histfile"
+  [ -r "$histfile" ] && history -r "$histfile"
 
-  while [ -z "$h" ]; do
-    read -r -e -p "Host: " h
-  done
+  if [ -z "$h" ]; then
+    h=$(read_host) || exit 0
+  fi
 
   # Keep one entry per host, with the most recent at the end.
   if [ "$(tail -n 1 "$histfile" 2>/dev/null)" != "$h" ]; then

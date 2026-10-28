@@ -8,4 +8,6 @@ jobs:
       - name: ShellCheck
         run: shellcheck ssh-wrapper tests/run.sh
       - name: Tests
-        run: tests/run.sh
+        run: |
+          tests/run.sh
+          python3 tests/completion.py

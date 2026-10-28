@@ -1,6 +1,13 @@
 # ssh-wrapper
 Wrapper around ssh to simplify dealing with lot of session.
 
+At the `Host:` prompt, press Tab to complete hostnames from the wrapper's
+history and SSH's `~/.ssh/known_hosts`, `~/.ssh/known_hosts2`,
+`/etc/ssh/ssh_known_hosts` and `/etc/ssh/ssh_known_hosts2`. Completion also
+works after `user@`; arrow keys recall previous connections. Entries with a
+port such as `[host]:2222` contribute the hostname; specify the port with
+`-p 2222`. Hashed, wildcard and revoked entries are ignored.
+
 If you invoke the script with the name 'ssh-root' (ie: as a symlink) it will connect as root@<HOST>.
   
 If used as a command iTerm2.app profile it remeber the host it was connected per iTerm session. So if you close and reopen iTerm ssh-wrapper automatically reconnect all hosts in their windows.
@@ -34,4 +41,5 @@ The public key used for `authorized_keys` is the first found among
 ```
 shellcheck ssh-wrapper tests/run.sh
 tests/run.sh
+python3 tests/completion.py
 ```
