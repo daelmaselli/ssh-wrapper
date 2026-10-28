@@ -2,7 +2,8 @@
 Wrapper around ssh to simplify dealing with lot of session.
 
 At the `Host:` prompt, press Tab to complete hostnames from the wrapper's
-history and SSH's `~/.ssh/known_hosts`, `~/.ssh/known_hosts2`,
+history, the `Host` aliases of `~/.ssh/config` (wildcards ignored) and SSH's
+`~/.ssh/known_hosts`, `~/.ssh/known_hosts2`,
 `/etc/ssh/ssh_known_hosts` and `/etc/ssh/ssh_known_hosts2`. Completion also
 works after `user@`; arrow keys recall previous connections. Entries with a
 port such as `[host]:2222` contribute the hostname; specify the port with

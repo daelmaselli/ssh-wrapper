@@ -31,6 +31,10 @@ def check(typed, expected, *, root=False):
             "wrtest-wild* ssh-ed25519 KEY\n"
             "|1|HASH|HASH ssh-ed25519 KEY\n"
         )
+        (home / ".ssh" / "config").write_text(
+            "Host wrtest-cfg wrtest-cfgalias\n  HostName example.org\n"
+            "Host wrtest-cfgwild-*\n  User x\n"
+        )
         (home / ".ssh" / "known_hosts2").write_text("wrtest-legacy ssh-rsa KEY\n")
         command = ROOT / "ssh-wrapper"
         if root:
@@ -83,6 +87,9 @@ for prefix, expected in [
     (b"2001:db8::4\t", "2001:db8::42"),
     (b"wrtest-cer\t", "wrtest-cert"),
     (b"wrtest-leg\t", "wrtest-legacy"),
+    (b"wrtest-cfga\t", "wrtest-cfgalias"),
+    (b"bob@wrtest-cfga\t", "bob@wrtest-cfgalias"),
+    (b"wrtest-cfgw\t", "wrtest-cfgw"),
     (b"wrtest-rev\t", "wrtest-rev"),
     (b"wrtest-wil\t", "wrtest-wil"),
     (b"\x1b[A", "wrtest-recent"),

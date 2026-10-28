@@ -4,7 +4,8 @@
 
 ### Behaviour changes
 - **Host completion**: Tab at the `Host:` prompt completes hosts from the
-  wrapper history and standard SSH known-hosts files, including `user@host`.
+  wrapper history, the standard SSH known-hosts files and the `Host` aliases
+  of `~/.ssh/config`, including `user@host`.
 - **Key selection**: the key used by the "add to authorized_keys" step and
   loaded with `ssh-add` is no longer always `~/.ssh/id_rsa`. The first
   existing one among `id_ed25519`, `id_ecdsa`, `id_rsa` (in this order) is

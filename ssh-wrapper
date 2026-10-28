@@ -74,6 +74,7 @@ read_host() (
   local sources=()
   HOSTFILE=$(mktemp "$optdir/hosts.XXXXXX") || return 1
   trap 'rm -f "$HOSTFILE"' EXIT
+  trap 'exit 130' INT TERM
 
   for file in "$histfile" "$HOME/.ssh/known_hosts" "$HOME/.ssh/known_hosts2" \
               /etc/ssh/ssh_known_hosts /etc/ssh/ssh_known_hosts2; do
@@ -99,6 +100,14 @@ read_host() (
         for (i = 1; i <= count; i++) emit(hosts[i])
       }
     ' "${sources[@]}" > "$HOSTFILE"
+  fi
+  # Host aliases from ~/.ssh/config (wildcard patterns are skipped).
+  if [ -r "$HOME/.ssh/config" ]; then
+    awk '
+      tolower($1) == "host" {
+        for (i = 2; i <= NF; i++)
+          if ($i !~ /[*?!]/ && !seen[$i]++) print "0.0.0.0 " $i
+      }' "$HOME/.ssh/config" >> "$HOSTFILE"
   fi
 
   # Initialize Readline before binding keys in this non-interactive Bash script
