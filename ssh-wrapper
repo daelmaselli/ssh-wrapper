@@ -123,7 +123,8 @@ choose_screen_action() {
   # connection, including after a dropped remote session.
   while true; do
     printf '\nScreen session action: [r]ecover (default), [c]reate, [l]ist, [s]hell, [q]uit: '
-    read -r -n 1 screenAction
+    # EOF (closed terminal) must quit, not loop on the default choice.
+    read -r -n 1 screenAction || return 1
     printf '\n'
 
     case "$screenAction" in
