@@ -23,6 +23,11 @@ an empty list falls back to creating a new session. The list includes the time
 and Attached/Detached status reported by `screen -ls`. New `screen` windows
 explicitly start the remote user's login shell.
 
+When the ssh-agent is forwarded, `screen`/`tmux` sessions use the stable
+symlink `~/.ssh-wrapper/agent.sock` on the remote host as `SSH_AUTH_SOCK`,
+refreshed on every reconnect, so `ssh-add -l` keeps working in long-lived
+sessions. Sessions created before this change must be recreated once.
+
 ## Files in `~/.ssh-wrapper`
 
 | File | Purpose |

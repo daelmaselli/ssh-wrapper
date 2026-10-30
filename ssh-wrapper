@@ -244,6 +244,18 @@ prepare_config() {
   fi
 }
 
+# The forwarded agent socket changes on every connection, so sessions that
+# outlive a connection would keep a dead SSH_AUTH_SOCK. Point them at a stable
+# per-user symlink that is refreshed on each (re)connect.
+stable_agent_socket() {
+  agent_link="$HOME/.ssh-wrapper/agent.sock"
+  if [ -n "${SSH_AUTH_SOCK:-}" ] && [ "$SSH_AUTH_SOCK" != "$agent_link" ] && [ -S "$SSH_AUTH_SOCK" ]; then
+    ln -sfn "$SSH_AUTH_SOCK" "$agent_link" 2>/dev/null || return 0
+  fi
+  [ -S "$agent_link" ] && export SSH_AUTH_SOCK="$agent_link"
+  return 0
+}
+
 fallback_notice() {
   requested="$1"
   reason="$2"
@@ -334,6 +346,8 @@ if ! prepare_config; then
   fallback_notice "Session" "cannot prepare the $mux configuration" "open a normal shell"
   normal_shell
 fi
+
+stable_agent_socket
 
 case "$action" in
   1) mux_recover "Recover or create $mux session" ;;
